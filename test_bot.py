@@ -1,7 +1,9 @@
 """Тесты MAX-бота: пользователи, модераторы, кнопки, заявки, парсинг API."""
 from __future__ import annotations
 
+import io
 import json
+import ssl
 import tempfile
 import unittest
 from dataclasses import dataclass
@@ -367,6 +369,7 @@ class TestMaxApiParsing(unittest.TestCase):
         api._token = "TEST"
         api._base_url = "https://platform-api2.max.ru"
         api._last_send = {}
+        api._ssl_context = ssl.create_default_context()
         return api
 
     def _parse(self, payload):
@@ -510,9 +513,6 @@ class TestMaxApiParsing(unittest.TestCase):
                 "url", 401, "Unauthorized", {}, io.BytesIO(b'{"code":"auth"}'))
             result = api._send_get("/updates")
         self.assertEqual(result, {})
-
-
-import io  # noqa: E402  (используется в TestMaxApiParsing)
 
 
 if __name__ == "__main__":

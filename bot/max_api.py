@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -16,6 +17,20 @@ if TYPE_CHECKING:
 # Лимит MAX: не более 2 сообщений в секунду в один диалог
 _SEND_INTERVAL = 0.55
 
+# Корневые сертификаты Минцифры (Russian Trusted CA) — их нет в стандартных хранилищах
+_CERTS_DIR = Path(__file__).resolve().parent.parent / "certs"
+
+
+def _make_ssl_context() -> ssl.SSLContext:
+    """SSL-контекст с системными CA + сертификатами Минцифры."""
+    context = ssl.create_default_context()
+    for cert_file in sorted(_CERTS_DIR.glob("*.crt")):
+        try:
+            context.load_verify_locations(cafile=str(cert_file))
+        except (ssl.SSLError, OSError) as e:
+            print(f"Не удалось добавить сертификат {cert_file.name}: {e}")
+    return context
+
 
 class MaxApi:
     """Обёртка над MAX Bot API (platform-api2.max.ru).
@@ -27,6 +42,7 @@ class MaxApi:
         self._base_url = "https://platform-api2.max.ru"
         self._token = config.bot_token
         self._last_send: dict[int, float] = {}
+        self._ssl_context = _make_ssl_context()
 
     # --- Обновления (long polling) ---
 
@@ -181,7 +197,7 @@ class MaxApi:
             headers={"Content-Type": "image/png"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=60) as response:
+        with urllib.request.urlopen(request, timeout=60, context=self._ssl_context) as response:
             body = json.loads(response.read().decode("utf-8"))
         token = body.get("token")
         if not token:
@@ -206,7 +222,7 @@ class MaxApi:
             headers={"Authorization": self._token},
             method="GET",
         )
-        return self._read_response(request)
+        return self._read_response(request, self._ssl_context)
 
     def _send_post(self, path: str, body: dict) -> dict:
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -219,7 +235,7 @@ class MaxApi:
             },
             method="POST",
         )
-        return self._read_response(request)
+        return self._read_response(request, self._ssl_context)
 
     def _send_patch(self, path: str, body: dict) -> dict:
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -232,12 +248,12 @@ class MaxApi:
             },
             method="PATCH",
         )
-        return self._read_response(request)
+        return self._read_response(request, self._ssl_context)
 
     @staticmethod
-    def _read_response(request: urllib.request.Request) -> dict:
+    def _read_response(request: urllib.request.Request, context: ssl.SSLContext) -> dict:
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with urllib.request.urlopen(request, timeout=60, context=context) as response:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:300]
