@@ -55,6 +55,10 @@ class ModHandler:
             self._send_welcome(update.chat_id)
             return
 
+        if text in ("/myid", "/id"):
+            self._send(update.chat_id, f"Ваш ID в MAX: {update.user_id}")
+            return
+
         with self._lock:
             ticket_id = self._pending_answer.pop(update.user_id, None)
             is_adding = update.user_id in self._pending_add

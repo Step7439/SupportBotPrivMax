@@ -37,6 +37,13 @@ class UserHandler:
             self._send_welcome(update.chat_id)
             return
 
+        if text in ("/myid", "/id"):
+            self._send(update.chat_id,
+                       f"Ваш ID в MAX: {update.user_id}\n"
+                       "Отправьте этот номер модератору, чтобы он добавил вас, "
+                       "или укажите его как OPERATOR_ID в .env.")
+            return
+
         if text in ("❓ FAQ", "/faq"):
             self._send(update.chat_id, (
                 "❓ Частые вопросы:\n"
