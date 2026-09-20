@@ -229,11 +229,20 @@ class ModHandler:
             self._send(user_id, f"Заявка #{ticket_id} уже закрыта.")
             return
         self._tickets.close(ticket_id)
+        # Снимаем блокировку с заявки у всех модераторов, кто её взял
+        with self._lock:
+            taker_id = self._taken_tickets.pop(ticket_id, None)
+            if taker_id is not None:
+                self._pending_answer.pop(taker_id, None)
+                self._pending_answer_names.pop(taker_id, None)
+        # Удаляем висячий промпт «Напишите ответ» у того, кто взял заявку
+        if taker_id is not None:
+            self._delete_prompt(taker_id)
         self._api.send_message(
             ticket.user_id,
             f"✅ Ваша заявка #{ticket_id} закрыта. Диалог по ней завершён. "
             "Если проблема осталась — создайте новую заявку кнопкой «📝 Заявка».",
-            keyboards.status_button(),
+            keyboards.closed_ticket_buttons(),
         )
         # Модераторы получают отдельное уведомление о закрытии
         notice = f"✅ Заявка #{ticket_id} закрыта ({ticket.user_name})."
@@ -248,11 +257,11 @@ class ModHandler:
             self._send(user_id, "Модераторов нет. Добавьте первого кнопкой ниже.")
         else:
             self._send(user_id, "🛠 Модераторы — нажмите, чтобы удалить:")
-            for user_id in all_mods:
+            for mod_id in all_mods:
                 self._send(
-                    user_id,
-                    f"• {user_id}",
-                    keyboards.remove_moderator_button(user_id),
+                    mod_id,
+                    f"• {mod_id}",
+                    keyboards.remove_moderator_button(mod_id),
                 )
         self._send(user_id, "Добавить модератора:", keyboards.add_moderator_button())
 
@@ -296,6 +305,8 @@ class ModHandler:
             self._send(update.user_id, "Нельзя удалить последнего модератора — бот останется без поддержки.")
             return
         if self._moderators.remove(user_id):
+            # Чистим сессии удалённого модератора: висячие режимы и блокировки заявок
+            self._reset_pending(user_id)
             self._send(update.user_id, f"Модератор {user_id} удалён.")
         else:
             self._send(update.user_id, f"{user_id} не является модератором.")

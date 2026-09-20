@@ -32,7 +32,6 @@ class FakeApi:
 
     def __init__(self) -> None:
         self.sent: list[Sent] = []
-        self.edits: list[tuple] = []
         self.deleted: list[tuple] = []
         self.callback_answers: list = []
         self.photos: list[tuple] = []
@@ -40,10 +39,6 @@ class FakeApi:
     def send_message(self, user_id, text, buttons=None):
         self.sent.append(Sent(user_id, text, buttons))
         return f"mid{len(self.sent)}"
-
-    def edit_message(self, user_id, message_id, text, buttons=None):
-        self.edits.append((user_id, message_id, text, buttons))
-        return True
 
     def delete_message(self, user_id, message_id):
         self.deleted.append((user_id, message_id))
@@ -206,6 +201,20 @@ class TestUserHandler(BaseTest):
         self.say("📊 Статус", user_id=200)
         self.assertIn("закрыта", self.api.texts(200)[-1])
 
+    def test_start_after_closed_ticket_mentions_it(self):
+        # /start после закрытия заявки напоминает о закрытии
+        self.say("📝 Заявка", user_id=200)
+        self.say("не работает вход", user_id=200)
+        self.tickets.close(1)
+        self.say("/start", user_id=200)
+        self.assertIn("заявка #1 закрыта", self.api.photos[0][2].lower())
+        self.assertIn("создайте новую заявку", self.api.photos[0][2])
+
+    def test_start_without_tickets_no_closed_notice(self):
+        # Без заявок напоминания о закрытии нет
+        self.say("/start", user_id=200)
+        self.assertNotIn("закрыта", self.api.photos[0][2].lower())
+
     def test_user_callback_ignored(self):
         # Не-модератор нажал старую/поддельную кнопку — заявка не создаётся
         self.users.handle(make_update(
@@ -239,6 +248,24 @@ class TestUserHandler(BaseTest):
         reply = self.api.to(100)[0]
         self.assertIn("спасибо, помогло", reply.text)
         self.assertEqual(reply.buttons[0][0]["payload"], "mod:answer:1")
+
+    def test_pending_ticket_reset_by_dialog_reply(self):
+        # Нажал «Заявка», но написал в существующий диалог —
+        # режим ввода описания сбрасывается, лишняя заявка не создаётся
+        self.say("📝 Заявка", user_id=200)
+        self.say("проблема А", user_id=200)
+        self.press("mod:answer:1")
+        self.say("вот решение")
+        self.say("📝 Заявка", user_id=200)  # случайно нажал снова
+        self.say("уточнение по проблеме", user_id=200)
+        # Сообщение ушло в диалог, а не создало заявку #2
+        self.assertEqual(len(self.tickets.get_all()), 1)
+        ticket = self.tickets.find_by_id(1)
+        self.assertEqual(ticket.messages[-1]["text"], "уточнение по проблеме")
+        self.api.sent.clear()
+        self.say("ещё сообщение", user_id=200)
+        # Режим ввода сброшен — второе сообщение не создаёт заявку
+        self.assertEqual(len(self.tickets.get_all()), 1)
 
     def test_user_reply_after_ticket_closed_rejected(self):
         # После закрытия заявки диалог недоступен
@@ -348,7 +375,9 @@ class TestModButtons(BaseTest):
         self.press("mod:close:1")
         close_msg = self.api.to(200)[0]
         self.assertIn("закрыта", close_msg.text)
-        self.assertEqual(close_msg.buttons[0][0]["payload"], "/status")
+        # Кнопки: новая заявка + статус
+        payloads = [b["payload"] for row in close_msg.buttons for b in row]
+        self.assertEqual(payloads, ["/ticket", "/status"])
 
     def test_answer_on_closed_ticket(self):
         self.tickets.close(1)
@@ -415,6 +444,16 @@ class TestModButtons(BaseTest):
         self.press("mod:answer:1")
         self.say("вот решение")
         self.assertIn("Ответ поддержки по заявке #1", self.api.texts(200)[0])
+
+    def test_close_releases_taken_ticket(self):
+        # Закрытие заявки снимает блокировку у модератора, взявшего её
+        self.press("mod:answer:1")
+        self.press("mod:close:1")
+        self.api.sent.clear()
+        # Взявший заявку модератор пишет ответ — получает отказ, а не отправку
+        self.say("вот решение")
+        self.assertIn("Не понял сообщение", self.api.texts(100)[-1])
+        self.assertEqual(self.api.to(200), [])
 
     def test_unknown_ticket(self):
         self.press("mod:close:99")

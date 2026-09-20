@@ -81,19 +81,12 @@ class UserHandler:
                 self._send(update.user_id, f"Ваша заявка #{last.id} — {status}\n\nТекст: {last.text}")
             return
 
-        # Описание заявки принимаем только после нажатия кнопки «📝 Заявка»
-        with self._lock:
-            expecting = update.user_id in self._pending_ticket
-            if expecting:
-                self._pending_ticket.discard(update.user_id)
-        if expecting:
-            self._create_ticket(update, text)
-            return
-
-        # Диалог по заявке: пользователь может писать только в открытую заявку,
-        # в которой модератор уже ответил
+        # Диалог по заявке важнее ввода новой: если модератор ждёт ответа
+        # пользователя в открытой заявке, сообщение уходит в диалог,
+        # а незавершённый ввод описания новой заявки сбрасываем
         ticket = self._tickets.find_last_open_by_user(update.user_id)
         if ticket is not None and any(m["author"] == "mod" for m in ticket.messages):
+            self._reset_pending(update.user_id)
             last_message_author = ticket.messages[-1]["author"]
             if last_message_author == "user":
                 # Пользователь уже отправил ответ — ждём реакции модератора
@@ -105,15 +98,20 @@ class UserHandler:
             self._send_reply(update, ticket, text)
             return
 
+        # Описание заявки принимаем только после нажатия кнопки «📝 Заявка»
+        with self._lock:
+            expecting = update.user_id in self._pending_ticket
+            if expecting:
+                self._pending_ticket.discard(update.user_id)
+        if expecting:
+            self._create_ticket(update, text)
+            return
+
         # Произвольный текст заявкой не считаем
         self._send(update.user_id, (
             "Чтобы создать заявку, нажмите кнопку «📝 Заявка» "
             "и опишите проблему одним сообщением."
         ))
-
-    def set_dialog_syncer(self, syncer) -> None:
-        """Совместимость: синкер диалога больше не нужен (гибридный режим)."""
-        pass
 
     def _send_welcome(self, user_id: int) -> None:
         caption = (
@@ -125,6 +123,13 @@ class UserHandler:
             "2. «📊 Статус» — статус вашей последней заявки\n"
             "3. «❓ FAQ» — частые вопросы"
         )
+        # Если последняя заявка закрыта — напоминаем об этом
+        last = self._find_last_user_ticket(user_id)
+        if last is not None and last.status != "NEW":
+            caption += (
+                f"\n\n✅ Ваша заявка #{last.id} закрыта. "
+                "Если проблема осталась — создайте новую заявку кнопкой «📝 Заявка»."
+            )
         if _LOGO_PATH.exists():
             try:
                 self._api.send_photo(user_id, _LOGO_PATH, caption)

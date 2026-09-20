@@ -43,6 +43,14 @@ def status_button() -> list[list[dict]]:
     ]
 
 
+def closed_ticket_buttons() -> list[list[dict]]:
+    """Кнопки к уведомлению о закрытии заявки: новая заявка + статус."""
+    return [
+        [{"type": "message", "text": "📝 Заявка", "payload": "/ticket"}],
+        [{"type": "message", "text": "📊 Статус", "payload": "/status"}],
+    ]
+
+
 def ticket_keyboard(ticket_id: int) -> list[list[dict]]:
     return with_menu([
         [
@@ -50,12 +58,6 @@ def ticket_keyboard(ticket_id: int) -> list[list[dict]]:
             {"type": "callback", "text": "✅ Закрыть", "payload": f"mod:close:{ticket_id}"},
         ],
     ])
-
-
-def close_button(ticket_id: int) -> list[list[dict]]:
-    return with_menu([[
-        {"type": "callback", "text": "✅ Закрыть заявку", "payload": f"mod:close:{ticket_id}"},
-    ]])
 
 
 def cancel_button(ticket_id: int) -> list[list[dict]]:

@@ -20,10 +20,8 @@ class Ticket:
     text: str
     status: str
     created_at: Optional[str] = field(default=None)
-    # Диалог: [{"author": "user"|"mod", "name": ..., "text": ...}, ...]
+    # Диалог: [{"author": "user"|"mod", "name": ..., "text": ..., "senderId": ...}, ...]
     messages: list = field(default_factory=list)
-    # message_id сообщения-диалога у каждого модератора: {user_id: message_id}
-    dialog_ids: dict = field(default_factory=dict)
 
 
 class TicketService:
@@ -50,7 +48,6 @@ class TicketService:
                 status=item["status"],
                 created_at=item.get("createdAt"),
                 messages=item.get("messages", []),
-                dialog_ids={int(k): v for k, v in item.get("dialogIds", {}).items()},
             )
             self._tickets[ticket.id] = ticket
         if self._tickets:
@@ -113,14 +110,6 @@ class TicketService:
                     "text": text,
                     "senderId": sender_id,
                 })
-                self._save()
-
-    def set_dialog_id(self, ticket_id: int, moderator_id: int, message_id: str) -> None:
-        """Запоминает message_id сообщения-диалога заявки у модератора."""
-        with self._lock:
-            ticket = self._tickets.get(ticket_id)
-            if ticket is not None:
-                ticket.dialog_ids[moderator_id] = message_id
                 self._save()
 
     def _save(self) -> None:

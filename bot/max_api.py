@@ -7,7 +7,6 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
-from uuid import uuid4
 
 from bot.update import Update
 
@@ -146,35 +145,6 @@ class MaxApi:
         message = root.get("message") or root
         return (message.get("body") or {}).get("mid")
 
-    def edit_message(
-        self,
-        user_id: int,
-        message_id: str,
-        text: str,
-        buttons: Optional[list[list[dict]]] = None,
-    ) -> bool:
-        """Редактирует отправленное ботом сообщение (PUT /messages).
-
-        Сообщения с inline_keyboard редактируются без ограничения по сроку.
-        Возвращает True при успехе — иначе можно отправить сообщение заново.
-        """
-        if len(text) > 4000:
-            text = text[:4000] + "\n…(сообщение обрезано)"
-        body: dict = {"text": text}
-        if buttons:
-            body["attachments"] = [{
-                "type": "inline_keyboard",
-                "payload": {"buttons": buttons},
-            }]
-        self._throttle(user_id)
-        root = self._send_put(f"/messages?message_id={message_id}", body)
-        if not root:
-            return False
-        if not root.get("success", True):
-            print(f"MAX не отредактировал сообщение: {root}")
-            return False
-        return True
-
     def answer_callback(self, callback_id: Optional[str], message: Optional[dict] = None) -> None:
         """Отвечает на нажатие кнопки (POST /answers).
 
@@ -270,19 +240,6 @@ class MaxApi:
         return self._read_response(request, self._ssl_context)
 
     def _send_post(self, path: str, body: dict) -> dict:
-        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        request = urllib.request.Request(
-            self._base_url + path,
-            data=data,
-            headers={
-                "Authorization": self._token,
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        return self._read_response(request, self._ssl_context)
-
-    def _send_put(self, path: str, body: dict) -> dict:
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             self._base_url + path,
