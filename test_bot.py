@@ -32,11 +32,22 @@ class FakeApi:
 
     def __init__(self) -> None:
         self.sent: list[Sent] = []
+        self.edits: list[tuple] = []
+        self.deleted: list[tuple] = []
         self.callback_answers: list = []
         self.photos: list[tuple] = []
 
     def send_message(self, user_id, text, buttons=None):
         self.sent.append(Sent(user_id, text, buttons))
+        return f"mid{len(self.sent)}"
+
+    def edit_message(self, user_id, message_id, text, buttons=None):
+        self.edits.append((user_id, message_id, text, buttons))
+        return True
+
+    def delete_message(self, user_id, message_id):
+        self.deleted.append((user_id, message_id))
+        return True
 
     def send_message_to_all(self, user_ids, text, buttons=None):
         for user_id in user_ids:
@@ -132,14 +143,49 @@ class TestUserHandler(BaseTest):
         self.say("📊 Статус", user_id=200)
         self.assertIn("нет заявок", self.api.texts(200)[0])
 
-    def test_plain_text_creates_ticket(self):
+    def test_plain_text_does_not_create_ticket(self):
+        # Заявка создаётся только после нажатия кнопки «📝 Заявка»
         self.say("не работает вход", user_id=200)
-        self.assertIn("Заявка #1 создана", self.api.texts(200)[0])
-        # Модератор получил уведомление с кнопками
-        mod_msg = self.api.to(100)[0]
-        self.assertIn("Новая заявка #1", mod_msg.text)
-        self.assertEqual(mod_msg.buttons[0][0]["payload"], "mod:answer:1")
-        self.assertEqual(mod_msg.buttons[0][1]["payload"], "mod:close:1")
+        self.assertEqual(self.tickets.get_all(), [])
+        self.assertIn("нажмите кнопку", self.api.texts(200)[0].lower())
+
+    def test_ticket_flow_separate_messages(self):
+        # Гибрид: каждое событие по заявке — отдельное сообщение у модератора
+        self.say("📝 Заявка", user_id=200)
+        self.say("проблема А", user_id=200)
+        notice = self.api.to(100)[0]
+        self.assertIn("Новая заявка #1", notice.text)
+        self.assertIn("проблема А", notice.text)
+        self.assertEqual(notice.buttons[0][0]["payload"], "mod:answer:1")
+
+        # Ответ модератора: пользователь получает ответ, автор — без дубля
+        self.press("mod:answer:1")
+        self.api.sent.clear()  # промпт «Напишите ответ» — служебное
+        self.say("вот решение")
+        self.assertIn("Ответ поддержки по заявке #1", self.api.texts(200)[0])
+        self.assertEqual(self.api.to(100), [])
+
+        # Ответ пользователя — отдельное сообщение модератору
+        self.say("спасибо, помогло", user_id=200)
+        reply = self.api.to(100)[0]
+        self.assertIn("Ответ пользователя по заявке #1", reply.text)
+        self.assertIn("спасибо, помогло", reply.text)
+        self.assertEqual(reply.buttons[0][0]["payload"], "mod:answer:1")
+
+    def test_mod_answer_visible_to_other_mods(self):
+        # Ответ модератора приходит отдельным сообщением другим модераторам
+        self.moderators.add(300)
+        self.say("📝 Заявка", user_id=200)
+        self.say("проблема А", user_id=200)
+        self.api.sent.clear()
+        self.press("mod:answer:1")
+        self.say("вот решение")
+        reply = self.api.to(300)[0]
+        self.assertIn("Ответ Тест по заявке #1", reply.text)
+        self.assertIn("вот решение", reply.text)
+        # Автор ответа не получает дубль (промпт удалён после отправки)
+        self.assertEqual(
+            [s for s in self.api.to(100) if "Напишите ответ" not in s.text], [])
 
     def test_empty_text_does_not_create_ticket(self):
         # Пустой текст отфильтровывается в Bot._handle, а обработчик
@@ -148,11 +194,13 @@ class TestUserHandler(BaseTest):
         self.assertEqual(self.tickets.get_all(), [])
 
     def test_status_after_ticket(self):
+        self.say("📝 Заявка", user_id=200)
         self.say("не работает вход", user_id=200)
         self.say("📊 Статус", user_id=200)
         self.assertIn("в работе", self.api.texts(200)[-1])
 
     def test_status_closed_ticket(self):
+        self.say("📝 Заявка", user_id=200)
         self.say("не работает вход", user_id=200)
         self.tickets.close(1)
         self.say("📊 Статус", user_id=200)
@@ -164,6 +212,69 @@ class TestUserHandler(BaseTest):
             "message_callback", 200, "", callback_id="x", callback_data="mod:close:1"))
         self.assertEqual(self.api.to(200), [])
         self.assertEqual(self.tickets.get_all(), [])
+
+    def test_user_reply_without_mod_answer_rejected(self):
+        # Пока модератор не ответил, сообщения пользователя в диалог не попадают
+        self.say("📝 Заявка", user_id=200)
+        self.say("проблема А", user_id=200)
+        self.api.sent.clear()
+        self.say("уточнение", user_id=200)
+        self.assertEqual(self.tickets.find_by_id(1).messages, [])
+        self.assertEqual(self.api.to(100), [])
+        self.assertIn("нажмите кнопку", self.api.texts(200)[0].lower())
+
+    def test_user_reply_after_mod_answer_goes_to_ticket(self):
+        # После ответа модератора пользователь пишет в ту же заявку
+        self.say("📝 Заявка", user_id=200)
+        self.say("проблема А", user_id=200)
+        self.press("mod:answer:1")
+        self.say("вот решение")
+        self.api.sent.clear()
+        self.say("спасибо, помогло", user_id=200)
+        ticket = self.tickets.find_by_id(1)
+        self.assertEqual(len(ticket.messages), 2)
+        self.assertEqual(ticket.messages[1]["author"], "user")
+        self.assertEqual(ticket.messages[1]["text"], "спасибо, помогло")
+        # Ответ пользователя пришёл модератору отдельным сообщением
+        reply = self.api.to(100)[0]
+        self.assertIn("спасибо, помогло", reply.text)
+        self.assertEqual(reply.buttons[0][0]["payload"], "mod:answer:1")
+
+    def test_user_reply_after_ticket_closed_rejected(self):
+        # После закрытия заявки диалог недоступен
+        self.say("📝 Заявка", user_id=200)
+        self.say("проблема А", user_id=200)
+        self.press("mod:answer:1")
+        self.say("вот решение")
+        self.press("mod:close:1")
+        self.api.sent.clear()
+        self.say("ещё вопрос", user_id=200)
+        self.assertEqual(self.api.to(100), [])
+        self.assertIn("нажмите кнопку", self.api.texts(200)[0].lower())
+
+    def test_user_second_reply_blocked_until_mod_answers(self):
+        # После отправки ответа пользователь не может писать, пока не ответит модератор
+        self.say("📝 Заявка", user_id=200)
+        self.say("проблема А", user_id=200)
+        self.press("mod:answer:1")
+        self.say("вот решение")
+        self.say("первый ответ", user_id=200)
+        self.api.sent.clear()
+        self.say("второе сообщение", user_id=200)
+        # Сообщение не ушло модераторам и в диалог не записано
+        self.assertEqual(self.api.to(100), [])
+        ticket = self.tickets.find_by_id(1)
+        self.assertEqual(len(ticket.messages), 2)
+        self.assertIn("Ждите ответ оператора", self.api.texts(200)[0])
+        # После нового ответа модератора пользователь снова может писать
+        self.press("mod:answer:1")
+        self.say("уточнение")
+        self.api.sent.clear()
+        self.say("ответ после ответа модератора", user_id=200)
+        ticket = self.tickets.find_by_id(1)
+        self.assertEqual(ticket.messages[-1]["author"], "user")
+        reply = self.api.to(100)[0]
+        self.assertIn("ответ после ответа модератора", reply.text)
 
 
 # --- Тесты модератора: команды ---
@@ -196,6 +307,7 @@ class TestModCommands(BaseTest):
         self.assertIn("Открытых заявок нет", self.api.texts(100)[0])
 
     def test_list_shows_tickets_with_buttons(self):
+        self.say("📝 Заявка", user_id=200)
         self.say("проблема А", user_id=200)
         self.api.sent.clear()
         self.press("mod:list")
@@ -210,6 +322,7 @@ class TestModCommands(BaseTest):
 class TestModButtons(BaseTest):
     def setUp(self):
         super().setUp()
+        self.say("📝 Заявка", user_id=200)
         self.say("проблема А", user_id=200)  # заявка #1 от пользователя 200
         self.api.sent.clear()
 
@@ -219,7 +332,23 @@ class TestModButtons(BaseTest):
         self.say("вот решение")
         self.assertIn("Ответ поддержки по заявке #1", self.api.texts(200)[0])
         self.assertIn("вот решение", self.api.texts(200)[0])
-        self.assertIn("Ответ отправлен", self.api.texts(100)[-1])
+        # Ответ модератора с кнопкой «Статус» для пользователя
+        status_msg = self.api.to(200)[0]
+        self.assertEqual(status_msg.buttons[0][0]["payload"], "/status")
+        # Ответ модератора записан в диалог заявки
+        ticket = self.tickets.find_by_id(1)
+        self.assertEqual(ticket.messages[0]["author"], "mod")
+        self.assertEqual(ticket.messages[0]["text"], "вот решение")
+        # Автор ответа не получает дубль своего сообщения
+        # (промпт «Напишите ответ» удалён после отправки)
+        self.assertEqual(
+            [s for s in self.api.to(100) if "Напишите ответ" not in s.text], [])
+
+    def test_close_notice_has_status_button(self):
+        self.press("mod:close:1")
+        close_msg = self.api.to(200)[0]
+        self.assertIn("закрыта", close_msg.text)
+        self.assertEqual(close_msg.buttons[0][0]["payload"], "/status")
 
     def test_answer_on_closed_ticket(self):
         self.tickets.close(1)
@@ -238,7 +367,6 @@ class TestModButtons(BaseTest):
         self.press("mod:close:1")
         self.assertEqual(self.tickets.find_by_id(1).status, "CLOSED")
         self.assertIn("закрыта", self.api.texts(200)[0])
-        self.assertIn("Заявка #1 закрыта", self.api.texts(100)[0])
 
     def test_double_close_no_duplicate_notice(self):
         self.press("mod:close:1")
@@ -251,10 +379,42 @@ class TestModButtons(BaseTest):
     def test_close_after_answer_button(self):
         self.press("mod:answer:1")
         self.say("вот решение")
-        close_btn = self.api.to(100)[-1].buttons[0][0]["payload"]
-        self.assertEqual(close_btn, "mod:close:1")
-        self.press(close_btn)
+        self.press("mod:close:1")
         self.assertEqual(self.tickets.find_by_id(1).status, "CLOSED")
+
+    def test_second_mod_cannot_take_taken_ticket(self):
+        # Пока один модератор печатает ответ, другой не может взять заявку
+        self.moderators.add(300)
+        self.press("mod:answer:1", user_id=100)
+        self.press("mod:answer:1", user_id=300)
+        self.assertIn("уже взял", self.api.texts(300)[0])
+        # Модератор 100 всё ещё может ответить
+        self.say("вот решение", user_id=100)
+        self.assertIn("Ответ поддержки по заявке #1", self.api.texts(200)[0])
+
+    def test_ticket_released_after_answer(self):
+        # После отправки ответа заявку может взять другой модератор
+        self.moderators.add(300)
+        self.press("mod:answer:1", user_id=100)
+        self.say("вот решение", user_id=100)
+        self.press("mod:answer:1", user_id=300)
+        prompt = [t for t in self.api.texts(300) if "Напишите ответ" in t]
+        self.assertTrue(prompt)
+
+    def test_ticket_released_on_cancel(self):
+        # Отмена ввода освобождает заявку для другого модератора
+        self.moderators.add(300)
+        self.press("mod:answer:1", user_id=100)
+        self.say("/cancel", user_id=100)
+        self.press("mod:answer:1", user_id=300)
+        self.assertIn("Напишите ответ по заявке #1", self.api.texts(300)[0])
+
+    def test_same_mod_can_repress_answer(self):
+        # Повторное нажатие «Ответить» тем же модератором не блокирует его
+        self.press("mod:answer:1")
+        self.press("mod:answer:1")
+        self.say("вот решение")
+        self.assertIn("Ответ поддержки по заявке #1", self.api.texts(200)[0])
 
     def test_unknown_ticket(self):
         self.press("mod:close:99")
@@ -284,27 +444,38 @@ class TestModButtons(BaseTest):
         self.assertIn("Не понял сообщение", self.api.texts(100)[0])
         self.assertEqual(self.api.to(200), [])
 
-    def test_answer_cancelled_by_cancel_button(self):
-        self.press("mod:answer:1")
-        self.press("mod:cancel:1")
-        self.assertIn("отменён", self.api.texts(100)[-1])
-        self.api.sent.clear()
-        self.say("просто текст")
-        self.assertIn("Не понял сообщение", self.api.texts(100)[0])
-        self.assertEqual(self.api.to(200), [])
-
     def test_answer_cancelled_by_cancel_command(self):
         self.press("mod:answer:1")
         self.say("/cancel")
         self.assertIn("Меню модератора", self.api.texts(100)[-1])
         self.api.sent.clear()
         self.say("просто текст")
+        self.assertIn("Не понял сообщение", self.api.texts(100)[0])
         self.assertEqual(self.api.to(200), [])
 
-    def test_answer_prompt_has_cancel_button(self):
+    def test_answer_prompt_has_no_buttons(self):
+        # Промпт «Напишите ответ» — только текст, без кнопок
         self.press("mod:answer:1")
         prompt = self.api.to(100)[0]
-        self.assertEqual(prompt.buttons[0][0]["payload"], "mod:cancel:1")
+        self.assertIn("Напишите ответ по заявке #1", prompt.text)
+        self.assertEqual(prompt.buttons, [])
+
+    def test_answer_prompt_deleted_after_answer(self):
+        # Промпт «Напишите ответ» удаляется после отправки ответа
+        self.press("mod:answer:1")
+        self.assertEqual(self.api.deleted, [])
+        self.say("вот решение")
+        self.assertEqual(len(self.api.deleted), 1)
+        self.assertEqual(self.api.deleted[0][0], 100)
+
+    def test_answer_prompt_deleted_on_cancel(self):
+        # Промпт удаляется и при отмене режима ответа
+        self.press("mod:answer:1")
+        self.say("/cancel")
+        self.assertEqual(len(self.api.deleted), 1)
+        # Повторная отмена не пытается удалять уже удалённый промпт
+        self.say("/cancel")
+        self.assertEqual(len(self.api.deleted), 1)
 
 
 # --- Тесты модераторов: добавление/удаление ---

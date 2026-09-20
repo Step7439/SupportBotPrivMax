@@ -120,13 +120,15 @@ class MaxApi:
         user_id: int,
         text: str,
         buttons: Optional[list[list[dict]]] = None,
-    ) -> None:
+    ) -> Optional[str]:
         """Отправляет текстовое сообщение, опционально с inline-клавиатурой.
 
         Личные диалоги в MAX адресуются по user_id получателя, а не по chat_id
         (chat_id из события может не существовать для /messages → 404).
 
         buttons — ряды кнопок: {"type": "callback", "text": "...", "payload": "..."}
+        Возвращает message_id отправленного сообщения (для последующего
+        редактирования) или None, если MAX не вернул идентификатор.
         """
         if len(text) > 4000:
             text = text[:4000] + "\n…(сообщение обрезано)"
@@ -140,6 +142,38 @@ class MaxApi:
         root = self._send_post(f"/messages?user_id={user_id}", body)
         if not root.get("success", True):
             print(f"MAX не принял сообщение: {root}")
+            return None
+        message = root.get("message") or root
+        return (message.get("body") or {}).get("mid")
+
+    def edit_message(
+        self,
+        user_id: int,
+        message_id: str,
+        text: str,
+        buttons: Optional[list[list[dict]]] = None,
+    ) -> bool:
+        """Редактирует отправленное ботом сообщение (PUT /messages).
+
+        Сообщения с inline_keyboard редактируются без ограничения по сроку.
+        Возвращает True при успехе — иначе можно отправить сообщение заново.
+        """
+        if len(text) > 4000:
+            text = text[:4000] + "\n…(сообщение обрезано)"
+        body: dict = {"text": text}
+        if buttons:
+            body["attachments"] = [{
+                "type": "inline_keyboard",
+                "payload": {"buttons": buttons},
+            }]
+        self._throttle(user_id)
+        root = self._send_put(f"/messages?message_id={message_id}", body)
+        if not root:
+            return False
+        if not root.get("success", True):
+            print(f"MAX не отредактировал сообщение: {root}")
+            return False
+        return True
 
     def answer_callback(self, callback_id: Optional[str], message: Optional[dict] = None) -> None:
         """Отвечает на нажатие кнопки (POST /answers).
@@ -245,6 +279,40 @@ class MaxApi:
                 "Content-Type": "application/json",
             },
             method="POST",
+        )
+        return self._read_response(request, self._ssl_context)
+
+    def _send_put(self, path: str, body: dict) -> dict:
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            self._base_url + path,
+            data=data,
+            headers={
+                "Authorization": self._token,
+                "Content-Type": "application/json",
+            },
+            method="PUT",
+        )
+        return self._read_response(request, self._ssl_context)
+
+    def delete_message(self, user_id: int, message_id: str) -> bool:
+        """Удаляет сообщение, отправленное ботом (DELETE /messages)."""
+        if not message_id:
+            return False
+        self._throttle(user_id)
+        root = self._send_delete(f"/messages?message_id={message_id}")
+        if not root:
+            return False
+        if not root.get("success", True):
+            print(f"MAX не удалил сообщение: {root}")
+            return False
+        return True
+
+    def _send_delete(self, path: str) -> dict:
+        request = urllib.request.Request(
+            self._base_url + path,
+            headers={"Authorization": self._token},
+            method="DELETE",
         )
         return self._read_response(request, self._ssl_context)
 

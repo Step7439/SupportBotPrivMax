@@ -13,13 +13,17 @@ STATUS_CLOSED = "CLOSED"
 
 @dataclass
 class Ticket:
-    """Заявка: номер, автор, текст и статус (NEW / CLOSED)."""
+    """Заявка: номер, автор, текст, статус (NEW / CLOSED) и диалог сообщений."""
     id: int
     user_id: int
     user_name: str
     text: str
     status: str
     created_at: Optional[str] = field(default=None)
+    # Диалог: [{"author": "user"|"mod", "name": ..., "text": ...}, ...]
+    messages: list = field(default_factory=list)
+    # message_id сообщения-диалога у каждого модератора: {user_id: message_id}
+    dialog_ids: dict = field(default_factory=dict)
 
 
 class TicketService:
@@ -45,6 +49,8 @@ class TicketService:
                 text=item["text"],
                 status=item["status"],
                 created_at=item.get("createdAt"),
+                messages=item.get("messages", []),
+                dialog_ids={int(k): v for k, v in item.get("dialogIds", {}).items()},
             )
             self._tickets[ticket.id] = ticket
         if self._tickets:
@@ -68,6 +74,14 @@ class TicketService:
             self._save()
             return ticket
 
+    def find_last_open_by_user(self, user_id: int) -> Optional[Ticket]:
+        """Последняя открытая заявка пользователя (для диалога)."""
+        last = None
+        for ticket in self._tickets.values():
+            if ticket.user_id == user_id and ticket.status == STATUS_NEW:
+                last = ticket
+        return last
+
     def find_by_id(self, ticket_id: int) -> Optional[Ticket]:
         return self._tickets.get(ticket_id)
 
@@ -85,6 +99,28 @@ class TicketService:
             ticket = self._tickets.get(ticket_id)
             if ticket is not None:
                 ticket.status = STATUS_CLOSED
+                self._save()
+
+    def add_message(self, ticket_id: int, author: str, name: str, text: str,
+                    sender_id: int = 0) -> None:
+        """Добавляет сообщение в диалог заявки и сохраняет."""
+        with self._lock:
+            ticket = self._tickets.get(ticket_id)
+            if ticket is not None:
+                ticket.messages.append({
+                    "author": author,
+                    "name": name,
+                    "text": text,
+                    "senderId": sender_id,
+                })
+                self._save()
+
+    def set_dialog_id(self, ticket_id: int, moderator_id: int, message_id: str) -> None:
+        """Запоминает message_id сообщения-диалога заявки у модератора."""
+        with self._lock:
+            ticket = self._tickets.get(ticket_id)
+            if ticket is not None:
+                ticket.dialog_ids[moderator_id] = message_id
                 self._save()
 
     def _save(self) -> None:

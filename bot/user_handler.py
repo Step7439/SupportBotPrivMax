@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -25,6 +26,9 @@ class UserHandler:
         self._api = api
         self._tickets = tickets
         self._moderators = moderators
+        # Пользователи, нажавшие «📝 Заявка» и сейчас вводящие описание
+        self._pending_ticket: set[int] = set()
+        self._lock = threading.Lock()
 
     def handle(self, update: Update) -> None:
         # Нажатие callback-кнопки от не-модератора (старое/поддельное) — игнорируем
@@ -34,6 +38,7 @@ class UserHandler:
         text = update.text.strip()
 
         if text in ("/start", "/help"):
+            self._reset_pending(update.user_id)
             self._send_welcome(update.user_id)
             return
 
@@ -45,6 +50,7 @@ class UserHandler:
             return
 
         if text in ("❓ FAQ", "/faq"):
+            self._reset_pending(update.user_id)
             self._send(update.user_id, (
                 "❓ Частые вопросы:\n"
                 "\n"
@@ -57,6 +63,8 @@ class UserHandler:
             return
 
         if text in ("📝 Заявка", "/ticket"):
+            with self._lock:
+                self._pending_ticket.add(update.user_id)
             self._send(update.user_id, (
                 "📝 Опишите вашу проблему одним сообщением — я создам заявку, "
                 "и оператор скоро ответит вам здесь."
@@ -64,21 +72,48 @@ class UserHandler:
             return
 
         if text in ("📊 Статус", "/status"):
+            self._reset_pending(update.user_id)
             last = self._find_last_user_ticket(update.user_id)
             if last is None:
-                self._send(update.user_id, "У вас пока нет заявок. Нажмите «📝 Заявка» или просто напишите нам.")
+                self._send(update.user_id, "У вас пока нет заявок. Нажмите «📝 Заявка», чтобы создать заявку.")
             else:
                 status = "🟡 в работе" if last.status == "NEW" else "✅ закрыта"
                 self._send(update.user_id, f"Ваша заявка #{last.id} — {status}\n\nТекст: {last.text}")
             return
 
-        if text.startswith("/ticket "):
-            description = text[len("/ticket"):].strip()
-            self._create_ticket(update, description)
+        # Описание заявки принимаем только после нажатия кнопки «📝 Заявка»
+        with self._lock:
+            expecting = update.user_id in self._pending_ticket
+            if expecting:
+                self._pending_ticket.discard(update.user_id)
+        if expecting:
+            self._create_ticket(update, text)
             return
 
-        # Любое другое сообщение — это тоже заявка
-        self._create_ticket(update, text)
+        # Диалог по заявке: пользователь может писать только в открытую заявку,
+        # в которой модератор уже ответил
+        ticket = self._tickets.find_last_open_by_user(update.user_id)
+        if ticket is not None and any(m["author"] == "mod" for m in ticket.messages):
+            last_message_author = ticket.messages[-1]["author"]
+            if last_message_author == "user":
+                # Пользователь уже отправил ответ — ждём реакции модератора
+                self._send(update.user_id, (
+                    "⏳ Ваш ответ отправлен. Ждите ответ оператора — "
+                    "следующее сообщение придёт вам от поддержки."
+                ))
+                return
+            self._send_reply(update, ticket, text)
+            return
+
+        # Произвольный текст заявкой не считаем
+        self._send(update.user_id, (
+            "Чтобы создать заявку, нажмите кнопку «📝 Заявка» "
+            "и опишите проблему одним сообщением."
+        ))
+
+    def set_dialog_syncer(self, syncer) -> None:
+        """Совместимость: синкер диалога больше не нужен (гибридный режим)."""
+        pass
 
     def _send_welcome(self, user_id: int) -> None:
         caption = (
@@ -86,10 +121,9 @@ class UserHandler:
             "👷 Добро пожаловать в техподдержку «ИТМеханизатор»!\n"
             "\n"
             "Как обратиться к нам:\n"
-            "1. Просто напишите сюда описание проблемы — мы её увидим.\n"
-            "2. «📝 Заявка» — создать заявку\n"
-            "3. «📊 Статус» — статус вашей последней заявки\n"
-            "4. «❓ FAQ» — частые вопросы"
+            "1. «📝 Заявка» — создать заявку\n"
+            "2. «📊 Статус» — статус вашей последней заявки\n"
+            "3. «❓ FAQ» — частые вопросы"
         )
         if _LOGO_PATH.exists():
             try:
@@ -100,7 +134,7 @@ class UserHandler:
                 return
             self._send(
                 user_id,
-                "Выберите действие или просто напишите вашу проблему:",
+                "Выберите действие:",
                 keyboards.USER_BUTTONS,
             )
         else:
@@ -141,5 +175,25 @@ class UserHandler:
             keyboards.ticket_keyboard(ticket.id),
         )
 
+    def _send_reply(self, update: Update, ticket, text: str) -> None:
+        """Ответ пользователя в диалог по своей открытой заявке."""
+        self._tickets.add_message(ticket.id, "user", update.user_name, text,
+                                  sender_id=update.user_id)
+        notice = (
+            f"💬 Ответ пользователя по заявке #{ticket.id} ({update.user_name}):\n"
+            f"\n"
+            f"{text}"
+        )
+        self._api.send_message_to_all(
+            self._moderators.get_all(),
+            notice,
+            keyboards.ticket_keyboard(ticket.id),
+        )
+
     def _send(self, user_id: int, text: str, buttons=None) -> None:
         self._api.send_message(user_id, text, buttons)
+
+    def _reset_pending(self, user_id: int) -> None:
+        """Сбрасывает режим ввода описания заявки."""
+        with self._lock:
+            self._pending_ticket.discard(user_id)

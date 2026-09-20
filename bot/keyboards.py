@@ -36,6 +36,13 @@ def menu_keyboard() -> list[list[dict]]:
     return [menu_row()]
 
 
+def status_button() -> list[list[dict]]:
+    """Кнопка «Статус» — прикрепляется к сообщениям модератора пользователю."""
+    return [
+        [{"type": "message", "text": "📊 Статус", "payload": "/status"}],
+    ]
+
+
 def ticket_keyboard(ticket_id: int) -> list[list[dict]]:
     return with_menu([
         [
@@ -52,9 +59,11 @@ def close_button(ticket_id: int) -> list[list[dict]]:
 
 
 def cancel_button(ticket_id: int) -> list[list[dict]]:
-    return with_menu([[
-        {"type": "callback", "text": "❌ Отмена", "payload": f"mod:cancel:{ticket_id}"},
-    ]])
+    """Промпт «Напишите ответ» — только надпись, без кнопок.
+
+    Отменить ввод можно командой /mod или /cancel.
+    """
+    return []
 
 
 def refresh_button() -> list[list[dict]]:
