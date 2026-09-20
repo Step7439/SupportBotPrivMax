@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
+from bot.max_api import AuthError
 from bot.mod_handler import ModHandler
 from bot.update import Update
 from bot.user_handler import UserHandler
@@ -36,6 +37,9 @@ class Bot:
                     self._handle(update)
             except KeyboardInterrupt:
                 raise
+            except AuthError as e:
+                print(f"Остановка: {e}")
+                raise SystemExit(1)
             except Exception as e:
                 print(f"Сбой связи с MAX, повтор через 5 секунд: {e}")
                 time.sleep(5)

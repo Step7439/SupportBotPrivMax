@@ -227,11 +227,27 @@ class TestModButtons(BaseTest):
         self.press("mod:answer:1")
         self.assertIn("не найдена или уже закрыта", self.api.texts(100)[0])
 
+    def test_answer_text_on_closed_ticket_not_sent(self):
+        # Режим ответа активен, но заявку закрыл другой модератор
+        self.press("mod:answer:1")
+        self.tickets.close(1)
+        self.say("вот решение")
+        self.assertIn("уже закрыта — ответ не отправлен", self.api.texts(100)[-1])
+        self.assertEqual(self.api.to(200), [])
+
     def test_close_flow(self):
         self.press("mod:close:1")
         self.assertEqual(self.tickets.find_by_id(1).status, "CLOSED")
         self.assertIn("закрыта", self.api.texts(200)[0])
         self.assertIn("Заявка #1 закрыта", self.api.texts(100)[0])
+
+    def test_double_close_no_duplicate_notice(self):
+        self.press("mod:close:1")
+        self.api.sent.clear()
+        self.press("mod:close:1")
+        self.assertIn("уже закрыта", self.api.texts(100)[0])
+        # Автору не ушло повторное уведомление о закрытии
+        self.assertEqual(self.api.to(200), [])
 
     def test_close_after_answer_button(self):
         self.press("mod:answer:1")
@@ -268,6 +284,28 @@ class TestModButtons(BaseTest):
         self.say("просто текст")
         self.assertIn("Не понял сообщение", self.api.texts(100)[0])
         self.assertEqual(self.api.to(200), [])
+
+    def test_answer_cancelled_by_cancel_button(self):
+        self.press("mod:answer:1")
+        self.press("mod:cancel:1")
+        self.assertIn("отменён", self.api.texts(100)[-1])
+        self.api.sent.clear()
+        self.say("просто текст")
+        self.assertIn("Не понял сообщение", self.api.texts(100)[0])
+        self.assertEqual(self.api.to(200), [])
+
+    def test_answer_cancelled_by_cancel_command(self):
+        self.press("mod:answer:1")
+        self.say("/cancel")
+        self.assertIn("Меню модератора", self.api.texts(100)[-1])
+        self.api.sent.clear()
+        self.say("просто текст")
+        self.assertEqual(self.api.to(200), [])
+
+    def test_answer_prompt_has_cancel_button(self):
+        self.press("mod:answer:1")
+        prompt = self.api.to(100)[0]
+        self.assertEqual(prompt.buttons[0][0]["payload"], "mod:cancel:1")
 
 
 # --- Тесты модераторов: добавление/удаление ---
@@ -510,9 +548,37 @@ class TestMaxApiParsing(unittest.TestCase):
         api = self._api()
         with patch("bot.max_api.urllib.request.urlopen") as urlopen:
             urlopen.side_effect = urllib.error.HTTPError(
-                "url", 401, "Unauthorized", {}, io.BytesIO(b'{"code":"auth"}'))
+                "url", 500, "Server Error", {}, io.BytesIO(b'{"code":"server"}'))
             result = api._send_get("/updates")
         self.assertEqual(result, {})
+
+    def test_auth_error_raised_on_401(self):
+        import urllib.error
+        from bot.max_api import AuthError
+        api = self._api()
+        with patch("bot.max_api.urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = urllib.error.HTTPError(
+                "url", 401, "Unauthorized", {}, io.BytesIO(b'{"code":"auth"}'))
+            with self.assertRaises(AuthError):
+                api._send_get("/updates")
+
+    def test_bot_run_stops_on_auth_error(self):
+        # При невалидном токене бот останавливается, а не ретраит вечно
+        from bot.bot import Bot
+        from bot.max_api import AuthError
+        bot = Bot.__new__(Bot)
+        bot._api = self._api()
+        bot._moderators = None
+        calls = {"n": 0}
+
+        def fail(marker):
+            calls["n"] += 1
+            raise AuthError("токен отклонён")
+
+        bot._get_updates = fail
+        with self.assertRaises(SystemExit):
+            bot.run()
+        self.assertEqual(calls["n"], 1)
 
 
 if __name__ == "__main__":

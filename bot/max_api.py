@@ -21,6 +21,10 @@ _SEND_INTERVAL = 0.55
 _CERTS_DIR = Path(__file__).resolve().parent.parent / "certs"
 
 
+class AuthError(RuntimeError):
+    """Токен бота отклонён MAX (401) — продолжать работу бессмысленно."""
+
+
 def _make_ssl_context() -> ssl.SSLContext:
     """SSL-контекст с системными CA + сертификатами Минцифры."""
     context = ssl.create_default_context()
@@ -257,5 +261,11 @@ class MaxApi:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:300]
+            if e.code in (401, 403):
+                # Токен недействителен/отозван — ретраи не помогут, останавливаемся
+                raise AuthError(
+                    f"MAX отклонил токен бота (HTTP {e.code}). "
+                    "Проверьте MAX_BOT_TOKEN в .env (dev.max.ru → Чат-боты → Настройки)."
+                )
             print(f"Ошибка MAX API ({e.code}): {detail}")
             return {}

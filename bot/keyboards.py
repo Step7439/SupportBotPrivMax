@@ -41,6 +41,12 @@ def close_button(ticket_id: int) -> list[list[dict]]:
     ]]
 
 
+def cancel_button(ticket_id: int) -> list[list[dict]]:
+    return [[
+        {"type": "callback", "text": "❌ Отмена", "payload": f"mod:cancel:{ticket_id}"},
+    ]]
+
+
 def refresh_button() -> list[list[dict]]:
     return [[{"type": "callback", "text": "🔄 Обновить", "payload": "mod:list"}]]
 

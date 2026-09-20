@@ -45,9 +45,7 @@ class ModHandler:
 
         if text in ("/mod", "🛠 Меню", "/help"):
             # Открытие меню сбрасывает незавершённые режимы (ожидание ответа/ID)
-            with self._lock:
-                self._pending_answer.pop(update.user_id, None)
-                self._pending_add.discard(update.user_id)
+            self._reset_pending(update.user_id)
             self._send_menu(update.chat_id)
             return
 
@@ -57,6 +55,11 @@ class ModHandler:
 
         if text in ("/myid", "/id"):
             self._send(update.chat_id, f"Ваш ID в MAX: {update.user_id}")
+            return
+
+        if text in ("/cancel", "отмена", "Отмена", "❌ Отмена"):
+            self._reset_pending(update.user_id)
+            self._send_menu(update.chat_id)
             return
 
         with self._lock:
@@ -120,6 +123,9 @@ class ModHandler:
             user_id = self._parse_callback_id(update, data)
             if user_id is not None:
                 self._remove_moderator(update, user_id)
+        elif data.startswith("mod:cancel:"):
+            self._reset_pending(update.user_id)
+            self._send(update.chat_id, "❌ Режим ввода отменён. Вот меню:", keyboards.menu_keyboard())
         else:
             self._send(update.chat_id, "Неизвестная кнопка. Откройте меню: /mod")
         # Подтверждаем нажатие, чтобы кнопка не выглядела «зависшей»
@@ -159,12 +165,16 @@ class ModHandler:
         self._send(
             update.chat_id,
             f"💬 Напишите ответ по заявке #{ticket_id} — я отправлю его {ticket.user_name}.",
+            keyboards.cancel_button(ticket_id),
         )
 
     def _send_answer(self, update: Update, ticket_id: int, text: str) -> None:
         ticket = self._tickets.find_by_id(ticket_id)
         if ticket is None:
             self._send(update.chat_id, f"Заявка #{ticket_id} не найдена.")
+            return
+        if ticket.status != "NEW":
+            self._send(update.chat_id, f"Заявка #{ticket_id} уже закрыта — ответ не отправлен.")
             return
         self._api.send_message(
             ticket.user_id,
@@ -181,6 +191,10 @@ class ModHandler:
         ticket = self._tickets.find_by_id(ticket_id)
         if ticket is None:
             self._send(chat_id, f"Заявка #{ticket_id} не найдена.")
+            return
+        if ticket.status != "NEW":
+            # Уже закрыта — не дублируем уведомление автору
+            self._send(chat_id, f"Заявка #{ticket_id} уже закрыта.")
             return
         self._tickets.close(ticket_id)
         self._api.send_message(
@@ -210,6 +224,7 @@ class ModHandler:
         self._send(
             update.chat_id,
             "Отправьте ID пользователя MAX нового модератора одним сообщением.",
+            keyboards.cancel_button(0),
         )
 
     def _add_moderator(self, update: Update, text: str) -> None:
@@ -249,3 +264,9 @@ class ModHandler:
 
     def _send(self, chat_id: int, text: str, buttons=None) -> None:
         self._api.send_message(chat_id, text, buttons)
+
+    def _reset_pending(self, user_id: int) -> None:
+        """Сбрасывает незавершённые режимы (ожидание ответа / ID модератора)."""
+        with self._lock:
+            self._pending_answer.pop(user_id, None)
+            self._pending_add.discard(user_id)
