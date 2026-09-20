@@ -61,6 +61,10 @@ class MaxApi:
         for node in root.get("updates", []):
             update = self._parse_update(node)
             if update is not None:
+                # user_id = 0 значит, структура события отличается от ожидаемой —
+                # логируем сырой JSON, чтобы быстро найти расхождение с докой
+                if update.user_id == 0:
+                    print(f"Не удалось распознать user_id в событии: {node}")
                 updates.append(update)
         return updates, root.get("marker")
 
@@ -82,7 +86,9 @@ class MaxApi:
         if update_type == "message_callback":
             callback = node.get("callback", {})
             message = callback.get("message", {})
-            sender = message.get("sender", {})
+            # sender у message_callback лежит прямо в callback.sender,
+            # но на всякий случай проверяем и callback.message.sender
+            sender = callback.get("sender") or message.get("sender") or {}
             payload = callback.get("payload")
             if isinstance(payload, str):
                 data = payload
@@ -140,6 +146,7 @@ class MaxApi:
         """Отвечает на нажатие кнопки (POST /answers).
 
         message — новое тело сообщения, которым заменяется сообщение с кнопкой.
+        Без message просто подтверждаем нажатие (message nullable по доке).
         """
         if not callback_id:
             return

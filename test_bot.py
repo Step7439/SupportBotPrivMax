@@ -435,6 +435,7 @@ class TestMaxApiParsing(unittest.TestCase):
         self.assertEqual(marker, 5)
 
     def test_message_callback_parsing(self):
+        # sender у message_callback лежит в callback.sender (не в callback.message.sender)
         updates, _ = self._parse({
             "updates": [{
                 "update_type": "message_callback",
@@ -442,8 +443,8 @@ class TestMaxApiParsing(unittest.TestCase):
                 "callback": {
                     "callback_id": "cb1",
                     "payload": "mod:list",
+                    "sender": {"user_id": 30, "name": "Мод"},
                     "message": {
-                        "sender": {"user_id": 30, "name": "Мод"},
                         "recipient": {"chat_id": 30},
                         "body": {"text": "старое"},
                     },
@@ -455,6 +456,28 @@ class TestMaxApiParsing(unittest.TestCase):
         self.assertEqual(updates[0].callback_id, "cb1")
         self.assertEqual(updates[0].callback_data, "mod:list")
         self.assertEqual(updates[0].user_id, 30)
+        self.assertEqual(updates[0].chat_id, 30)
+
+    def test_message_callback_fallback_sender(self):
+        # Запасной вариант: sender внутри callback.message.sender
+        updates, _ = self._parse({
+            "updates": [{
+                "update_type": "message_callback",
+                "timestamp": 2,
+                "callback": {
+                    "callback_id": "cb2",
+                    "payload": "mod:list",
+                    "message": {
+                        "sender": {"user_id": 31, "name": "Мод2"},
+                        "recipient": {"chat_id": 31},
+                        "body": {"text": "старое"},
+                    },
+                },
+            }],
+            "marker": 6,
+        })
+        self.assertEqual(updates[0].user_id, 31)
+        self.assertEqual(updates[0].callback_id, "cb2")
 
     def test_bot_started_becomes_start(self):
         updates, _ = self._parse({
