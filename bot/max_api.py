@@ -248,7 +248,7 @@ class MaxApi:
                 "Authorization": self._token,
                 "Content-Type": "application/json",
             },
-            method="PUT",
+            method="POST",
         )
         return self._read_response(request, self._ssl_context)
 
