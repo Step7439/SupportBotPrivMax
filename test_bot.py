@@ -35,24 +35,24 @@ class FakeApi:
         self.callback_answers: list = []
         self.photos: list[tuple] = []
 
-    def send_message(self, chat_id, text, buttons=None):
-        self.sent.append(Sent(chat_id, text, buttons))
+    def send_message(self, user_id, text, buttons=None):
+        self.sent.append(Sent(user_id, text, buttons))
 
-    def send_message_to_all(self, chat_ids, text, buttons=None):
-        for chat_id in chat_ids:
-            self.send_message(chat_id, text, buttons)
+    def send_message_to_all(self, user_ids, text, buttons=None):
+        for user_id in user_ids:
+            self.send_message(user_id, text, buttons)
 
     def answer_callback(self, callback_id, message=None):
         self.callback_answers.append(callback_id)
 
-    def send_photo(self, chat_id, photo_path, caption=""):
-        self.photos.append((chat_id, str(photo_path), caption))
+    def send_photo(self, user_id, photo_path, caption=""):
+        self.photos.append((user_id, str(photo_path), caption))
 
-    def to(self, chat_id: int) -> list[Sent]:
-        return [s for s in self.sent if s.chat_id == chat_id]
+    def to(self, user_id: int) -> list[Sent]:
+        return [s for s in self.sent if s.chat_id == user_id]
 
-    def texts(self, chat_id: int) -> list[str]:
-        return [s.text for s in self.to(chat_id)]
+    def texts(self, user_id: int) -> list[str]:
+        return [s.text for s in self.to(user_id)]
 
 
 class FakeConfig:
@@ -62,10 +62,9 @@ class FakeConfig:
         self.operator_id = None
 
 
-def make_update(update_type, user_id, text, chat_id=None, callback_id=None, callback_data=""):
+def make_update(update_type, user_id, text, callback_id=None, callback_data=""):
     return Update(
         update_type=update_type,
-        chat_id=chat_id or user_id,
         user_id=user_id,
         user_name="Тест",
         text=text,
@@ -430,12 +429,12 @@ class TestMaxApiParsing(unittest.TestCase):
         })
         self.assertEqual(len(updates), 1)
         self.assertEqual(updates[0].user_id, 20)
-        self.assertEqual(updates[0].chat_id, 10)
         self.assertEqual(updates[0].text, "привет")
         self.assertEqual(marker, 5)
 
     def test_message_callback_parsing(self):
-        # sender у message_callback лежит в callback.sender (не в callback.message.sender)
+        # Нажавший кнопку лежит в callback.user (реальная структура из логов MAX),
+        # message.sender — это сам бот
         updates, _ = self._parse({
             "updates": [{
                 "update_type": "message_callback",
@@ -443,10 +442,11 @@ class TestMaxApiParsing(unittest.TestCase):
                 "callback": {
                     "callback_id": "cb1",
                     "payload": "mod:list",
-                    "sender": {"user_id": 30, "name": "Мод"},
+                    "user": {"user_id": 30, "name": "Мод", "is_bot": False},
                     "message": {
-                        "recipient": {"chat_id": 30},
+                        "recipient": {"chat_id": 30, "chat_type": "dialog", "user_id": 30},
                         "body": {"text": "старое"},
+                        "sender": {"user_id": 999, "name": "SmartBot", "is_bot": True},
                     },
                 },
             }],
@@ -456,10 +456,27 @@ class TestMaxApiParsing(unittest.TestCase):
         self.assertEqual(updates[0].callback_id, "cb1")
         self.assertEqual(updates[0].callback_data, "mod:list")
         self.assertEqual(updates[0].user_id, 30)
-        self.assertEqual(updates[0].chat_id, 30)
+        self.assertEqual(updates[0].user_name, "Мод")
+
+    def test_message_callback_without_message(self):
+        # callback.message может не прийти — адрес берём из user_id нажавшего
+        updates, _ = self._parse({
+            "updates": [{
+                "update_type": "message_callback",
+                "timestamp": 2,
+                "callback": {
+                    "callback_id": "cb3",
+                    "payload": "mod:list",
+                    "user": {"user_id": 32, "name": "Мод3", "is_bot": False},
+                },
+            }],
+            "marker": 6,
+        })
+        self.assertEqual(updates[0].user_id, 32)
+        self.assertEqual(updates[0].callback_id, "cb3")
 
     def test_message_callback_fallback_sender(self):
-        # Запасной вариант: sender внутри callback.message.sender
+        # Запасной вариант: sender внутри callback.sender
         updates, _ = self._parse({
             "updates": [{
                 "update_type": "message_callback",
@@ -467,8 +484,8 @@ class TestMaxApiParsing(unittest.TestCase):
                 "callback": {
                     "callback_id": "cb2",
                     "payload": "mod:list",
+                    "sender": {"user_id": 31, "name": "Мод2"},
                     "message": {
-                        "sender": {"user_id": 31, "name": "Мод2"},
                         "recipient": {"chat_id": 31},
                         "body": {"text": "старое"},
                     },
@@ -511,7 +528,7 @@ class TestMaxApiParsing(unittest.TestCase):
                 [{"type": "callback", "text": "b", "payload": "x"}],
             ])
         path, body = posts[0]
-        self.assertTrue(path.startswith("/messages?chat_id=5"))
+        self.assertTrue(path.startswith("/messages?user_id=5"))
         att = body["attachments"][0]
         self.assertEqual(att["type"], "inline_keyboard")
         self.assertEqual(att["payload"]["buttons"][0][0]["payload"], "x")
@@ -547,7 +564,17 @@ class TestMaxApiParsing(unittest.TestCase):
         api = self._api()
         with patch.object(api, "_send_post", return_value={}) as p:
             api.answer_callback("cb9")
-        self.assertEqual(p.call_args[0][0], "/answers?callback_id=cb9")
+        path, body = p.call_args[0]
+        self.assertEqual(path, "/answers?callback_id=cb9")
+        # Без message обязательно отправляем notification
+        self.assertEqual(body["notification"], "Ок")
+
+    def test_answer_callback_with_message(self):
+        api = self._api()
+        with patch.object(api, "_send_post", return_value={}) as p:
+            api.answer_callback("cb9", message={"text": "новый текст"})
+        body = p.call_args[0][1]
+        self.assertEqual(body["message"]["text"], "новый текст")
 
     def test_set_commands(self):
         api = self._api()

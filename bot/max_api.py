@@ -77,7 +77,6 @@ class MaxApi:
             body = message.get("body", {})
             return Update(
                 update_type=update_type,
-                chat_id=message.get("recipient", {}).get("chat_id", 0),
                 user_id=sender.get("user_id", 0),
                 user_name=sender.get("name", "Пользователь"),
                 text=body.get("text", "") or "",
@@ -85,10 +84,9 @@ class MaxApi:
 
         if update_type == "message_callback":
             callback = node.get("callback", {})
-            message = callback.get("message", {})
-            # sender у message_callback лежит прямо в callback.sender,
-            # но на всякий случай проверяем и callback.message.sender
-            sender = callback.get("sender") or message.get("sender") or {}
+            # Нажавший кнопку лежит в callback.user (по факту из логов MAX);
+            # message.sender — это сам бот, его брать нельзя
+            sender = callback.get("user") or callback.get("sender") or {}
             payload = callback.get("payload")
             if isinstance(payload, str):
                 data = payload
@@ -96,7 +94,6 @@ class MaxApi:
                 data = json.dumps(payload, ensure_ascii=False) if payload else ""
             return Update(
                 update_type=update_type,
-                chat_id=message.get("recipient", {}).get("chat_id", 0),
                 user_id=sender.get("user_id", 0),
                 user_name=sender.get("name", "Пользователь"),
                 text="",
@@ -108,7 +105,6 @@ class MaxApi:
             user = node.get("user", {})
             return Update(
                 update_type=update_type,
-                chat_id=user.get("user_id", 0),
                 user_id=user.get("user_id", 0),
                 user_name=user.get("name", "Пользователь"),
                 text="/start",
@@ -121,11 +117,14 @@ class MaxApi:
 
     def send_message(
         self,
-        chat_id: int,
+        user_id: int,
         text: str,
         buttons: Optional[list[list[dict]]] = None,
     ) -> None:
         """Отправляет текстовое сообщение, опционально с inline-клавиатурой.
+
+        Личные диалоги в MAX адресуются по user_id получателя, а не по chat_id
+        (chat_id из события может не существовать для /messages → 404).
 
         buttons — ряды кнопок: {"type": "callback", "text": "...", "payload": "..."}
         """
@@ -137,8 +136,8 @@ class MaxApi:
                 "type": "inline_keyboard",
                 "payload": {"buttons": buttons},
             }]
-        self._throttle(chat_id)
-        root = self._send_post(f"/messages?chat_id={chat_id}", body)
+        self._throttle(user_id)
+        root = self._send_post(f"/messages?user_id={user_id}", body)
         if not root.get("success", True):
             print(f"MAX не принял сообщение: {root}")
 
@@ -146,34 +145,35 @@ class MaxApi:
         """Отвечает на нажатие кнопки (POST /answers).
 
         message — новое тело сообщения, которым заменяется сообщение с кнопкой.
-        Без message просто подтверждаем нажатие (message nullable по доке).
+        Без message отправляем одноразовое notification — MAX требует
+        хотя бы одно из двух (`message` or `notification` required).
         """
         if not callback_id:
             return
-        body: dict = {}
+        body: dict = {"notification": "Ок"}
         if message is not None:
             body["message"] = message
         root = self._send_post(f"/answers?callback_id={callback_id}", body)
         if not root.get("success", True):
             print(f"MAX не принял ответ на callback: {root}")
 
-    def send_message_to_all(self, chat_ids: list[int], text: str,
+    def send_message_to_all(self, user_ids: list[int], text: str,
                             buttons: Optional[list[list[dict]]] = None) -> None:
-        for chat_id in chat_ids:
-            self.send_message(chat_id, text, buttons)
+        for user_id in user_ids:
+            self.send_message(user_id, text, buttons)
 
-    def _throttle(self, chat_id: int) -> None:
+    def _throttle(self, user_id: int) -> None:
         """Держит паузу между сообщениями в один диалог (лимит MAX: 2/сек)."""
         now = time.monotonic()
-        last = self._last_send.get(chat_id, 0.0)
+        last = self._last_send.get(user_id, 0.0)
         wait = _SEND_INTERVAL - (now - last)
         if wait > 0:
             time.sleep(wait)
-        self._last_send[chat_id] = time.monotonic()
+        self._last_send[user_id] = time.monotonic()
 
     # --- Медиафайлы: логотип ---
 
-    def send_photo(self, chat_id: int, photo_path: Path, caption: str = "") -> None:
+    def send_photo(self, user_id: int, photo_path: Path, caption: str = "") -> None:
         """Отправляет картинку с подписью: POST /uploads → token → POST /messages."""
         token = self._upload_image(photo_path)
         attachments: list[dict] = [{"type": "image", "payload": {"token": token}}]
@@ -182,8 +182,8 @@ class MaxApi:
                 "type": "inline_keyboard",
                 "payload": {"buttons": buttons},
             })
-        self._throttle(chat_id)
-        root = self._send_post(f"/messages?chat_id={chat_id}", {
+        self._throttle(user_id)
+        root = self._send_post(f"/messages?user_id={user_id}", {
             "text": caption[:4000],
             "attachments": attachments,
         })
@@ -268,11 +268,13 @@ class MaxApi:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", "replace")[:300]
-            if e.code in (401, 403):
-                # Токен недействителен/отозван — ретраи не помогут, останавливаемся
+            if e.code == 401:
+                # Токен недействителен — ретраи не помогут, останавливаемся
                 raise AuthError(
-                    f"MAX отклонил токен бота (HTTP {e.code}). "
+                    f"MAX отклонил токен бота (HTTP 401). "
                     "Проверьте MAX_BOT_TOKEN в .env (dev.max.ru → Чат-боты → Настройки)."
                 )
-            print(f"Ошибка MAX API ({e.code}): {detail}")
+            # 403 и прочее — точечный отказ (устаревший callback, запрет действия),
+            # бот продолжает работу; печатаем адрес и ответ MAX для диагностики
+            print(f"Ошибка MAX API ({e.code}) на {request.full_url}: {detail}")
             return {}

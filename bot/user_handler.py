@@ -34,18 +34,18 @@ class UserHandler:
         text = update.text.strip()
 
         if text in ("/start", "/help"):
-            self._send_welcome(update.chat_id)
+            self._send_welcome(update.user_id)
             return
 
         if text in ("/myid", "/id"):
-            self._send(update.chat_id,
+            self._send(update.user_id,
                        f"Ваш ID в MAX: {update.user_id}\n"
                        "Отправьте этот номер модератору, чтобы он добавил вас, "
                        "или укажите его как OPERATOR_ID в .env.")
             return
 
         if text in ("❓ FAQ", "/faq"):
-            self._send(update.chat_id, (
+            self._send(update.user_id, (
                 "❓ Частые вопросы:\n"
                 "\n"
                 "1. Не запускается приложение — попробуйте очистить кэш и перезапустить.\n"
@@ -57,7 +57,7 @@ class UserHandler:
             return
 
         if text in ("📝 Заявка", "/ticket"):
-            self._send(update.chat_id, (
+            self._send(update.user_id, (
                 "📝 Опишите вашу проблему одним сообщением — я создам заявку, "
                 "и оператор скоро ответит вам здесь."
             ))
@@ -66,10 +66,10 @@ class UserHandler:
         if text in ("📊 Статус", "/status"):
             last = self._find_last_user_ticket(update.user_id)
             if last is None:
-                self._send(update.chat_id, "У вас пока нет заявок. Нажмите «📝 Заявка» или просто напишите нам.")
+                self._send(update.user_id, "У вас пока нет заявок. Нажмите «📝 Заявка» или просто напишите нам.")
             else:
                 status = "🟡 в работе" if last.status == "NEW" else "✅ закрыта"
-                self._send(update.chat_id, f"Ваша заявка #{last.id} — {status}\n\nТекст: {last.text}")
+                self._send(update.user_id, f"Ваша заявка #{last.id} — {status}\n\nТекст: {last.text}")
             return
 
         if text.startswith("/ticket "):
@@ -80,7 +80,7 @@ class UserHandler:
         # Любое другое сообщение — это тоже заявка
         self._create_ticket(update, text)
 
-    def _send_welcome(self, chat_id: int) -> None:
+    def _send_welcome(self, user_id: int) -> None:
         caption = (
             "🛠 ИТМеханизатор — Support\n\n"
             "👷 Добро пожаловать в техподдержку «ИТМеханизатор»!\n"
@@ -93,18 +93,18 @@ class UserHandler:
         )
         if _LOGO_PATH.exists():
             try:
-                self._api.send_photo(chat_id, _LOGO_PATH, caption)
+                self._api.send_photo(user_id, _LOGO_PATH, caption)
             except Exception as e:
                 print(f"Не удалось отправить логотип: {e}")
-                self._send(chat_id, caption, keyboards.USER_BUTTONS)
+                self._send(user_id, caption, keyboards.USER_BUTTONS)
                 return
             self._send(
-                chat_id,
+                user_id,
                 "Выберите действие или просто напишите вашу проблему:",
                 keyboards.USER_BUTTONS,
             )
         else:
-            self._send(chat_id, caption, keyboards.USER_BUTTONS)
+            self._send(user_id, caption, keyboards.USER_BUTTONS)
 
     def _find_last_user_ticket(self, user_id: int):
         last = None
@@ -121,13 +121,13 @@ class UserHandler:
 
     def _create_ticket(self, update: Update, description: str) -> None:
         if not description.strip():
-            self._send(update.chat_id, (
+            self._send(update.user_id, (
                 "📝 Опишите вашу проблему одним сообщением — я создам заявку, "
                 "и оператор скоро ответит вам здесь."
             ))
             return
         ticket = self._tickets.create(update.user_id, update.user_name, description)
-        self._send(update.chat_id, f"✅ Заявка #{ticket.id} создана. Оператор скоро ответит вам здесь.")
+        self._send(update.user_id, f"✅ Заявка #{ticket.id} создана. Оператор скоро ответит вам здесь.")
 
         # Уведомляем всех модераторов с кнопками действий
         notice = (
@@ -141,5 +141,5 @@ class UserHandler:
             keyboards.ticket_keyboard(ticket.id),
         )
 
-    def _send(self, chat_id: int, text: str, buttons=None) -> None:
-        self._api.send_message(chat_id, text, buttons)
+    def _send(self, user_id: int, text: str, buttons=None) -> None:
+        self._api.send_message(user_id, text, buttons)

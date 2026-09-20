@@ -1,12 +1,10 @@
-"""Кнопки для бота техподдержки в MAX.
+"""Кнопки для бота техподдержки в мессенджере MAX.
 
 Типы кнопок MAX:
 - callback — нажатие приходит как событие message_callback с payload;
 - message  — при нажатии пользователь отправляет заданный текст
              (так делаем «меню» вместо reply-клавиатуры, которой в MAX нет).
 """
-
-MENU_BUTTON = {"type": "message", "text": "🛠 Меню", "payload": "/mod"}
 
 USER_BUTTONS = [
     [
@@ -17,43 +15,57 @@ USER_BUTTONS = [
 ]
 
 
-def menu_keyboard() -> list[list[dict]]:
-    """Кнопки меню модератора под сообщением."""
+def menu_row() -> list[dict]:
+    """Ряд главных кнопок — добавляется внизу клавиатур модератора,
+    чтобы «Открытые заявки» и «Модераторы» всегда были под рукой."""
     return [
-        [{"type": "callback", "text": "📋 Открытые заявки", "payload": "mod:list"}],
-        [{"type": "callback", "text": "🛠 Модераторы", "payload": "mod:mods"}],
-        [{"type": "message", "text": "🛠 Меню", "payload": "/mod"}],
+        {"type": "callback", "text": "📋 Открытые заявки", "payload": "mod:list"},
+        {"type": "callback", "text": "🛠 Модераторы", "payload": "mod:mods"},
     ]
 
 
+def with_menu(buttons: list[list[dict]]) -> list[list[dict]]:
+    """Добавляет ряд главных кнопок внизу клавиатуры (если его там ещё нет)."""
+    if buttons and buttons[-1] == menu_row():
+        return buttons
+    return buttons + [menu_row()]
+
+
+def menu_keyboard() -> list[list[dict]]:
+    """Кнопки меню модератора под сообщением."""
+    return [menu_row()]
+
+
 def ticket_keyboard(ticket_id: int) -> list[list[dict]]:
-    return [
+    return with_menu([
         [
             {"type": "callback", "text": "💬 Ответить", "payload": f"mod:answer:{ticket_id}"},
             {"type": "callback", "text": "✅ Закрыть", "payload": f"mod:close:{ticket_id}"},
         ],
-    ]
+    ])
 
 
 def close_button(ticket_id: int) -> list[list[dict]]:
-    return [[
+    return with_menu([[
         {"type": "callback", "text": "✅ Закрыть заявку", "payload": f"mod:close:{ticket_id}"},
-    ]]
+    ]])
 
 
 def cancel_button(ticket_id: int) -> list[list[dict]]:
-    return [[
+    return with_menu([[
         {"type": "callback", "text": "❌ Отмена", "payload": f"mod:cancel:{ticket_id}"},
-    ]]
+    ]])
 
 
 def refresh_button() -> list[list[dict]]:
-    return [[{"type": "callback", "text": "🔄 Обновить", "payload": "mod:list"}]]
+    return with_menu([[{"type": "callback", "text": "🔄 Обновить", "payload": "mod:list"}]])
 
 
 def remove_moderator_button(user_id: int) -> list[list[dict]]:
-    return [[{"type": "callback", "text": "🗑 Удалить", "payload": f"mod:remove:{user_id}"}]]
+    return with_menu([[
+        {"type": "callback", "text": "🗑 Удалить", "payload": f"mod:remove:{user_id}"},
+    ]])
 
 
 def add_moderator_button() -> list[list[dict]]:
-    return [[{"type": "callback", "text": "➕ Добавить модератора", "payload": "mod:add"}]]
+    return with_menu([[{"type": "callback", "text": "➕ Добавить модератора", "payload": "mod:add"}]])
