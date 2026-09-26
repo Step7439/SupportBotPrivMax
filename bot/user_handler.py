@@ -181,7 +181,8 @@ class UserHandler:
         )
 
     def _send_reply(self, update: Update, ticket, text: str) -> None:
-        """Ответ пользователя в диалог по своей открытой заявке."""
+        """Ответ пользователя в диалог по своей открытой заявке —
+        уходит только модератору, который ведёт эту заявку."""
         self._tickets.add_message(ticket.id, "user", update.user_name, text,
                                   sender_id=update.user_id)
         notice = (
@@ -189,11 +190,17 @@ class UserHandler:
             f"\n"
             f"{text}"
         )
-        self._api.send_message_to_all(
-            self._moderators.get_all(),
-            notice,
-            keyboards.ticket_keyboard(ticket.id),
-        )
+        assignee = self._tickets.get_assignee(ticket.id)
+        if assignee is not None:
+            self._api.send_message(
+                assignee, notice, keyboards.ticket_keyboard(ticket.id))
+        else:
+            # Заявка не закреплена — уведомляем всех модераторов
+            self._api.send_message_to_all(
+                self._moderators.get_all(),
+                notice,
+                keyboards.ticket_keyboard(ticket.id),
+            )
 
     def _send(self, user_id: int, text: str, buttons=None) -> None:
         self._api.send_message(user_id, text, buttons)

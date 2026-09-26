@@ -36,10 +36,6 @@ class ModHandler:
         self._pending_prompt_ids: dict[int, str] = {}
         # Модератор, который сейчас вводит ID нового модератора
         self._pending_add: set[int] = set()
-        # Заявки, взятые в работу: номер заявки -> user_id модератора
-        self._taken_tickets: dict[int, int] = {}
-        # Имена модераторов, взявших заявки (для подсказки другим)
-        self._pending_answer_names: dict[int, str] = {}
         self._lock = threading.Lock()
 
     def handle(self, update: Update) -> None:
@@ -78,6 +74,13 @@ class ModHandler:
             return
         if is_adding:
             self._add_moderator(update, text)
+            return
+
+        # Диалог по закреплённой заявке: если пользователь ждёт ответа
+        # модератора в заявке, закреплённой за ним, — текст уходит в диалог
+        ticket = self._find_assigned_pending_ticket(update.user_id)
+        if ticket is not None:
+            self._send_answer(update, ticket.id, text)
             return
 
         # Неизвестное сообщение — подсказываем и сразу даём кнопку меню
@@ -163,23 +166,23 @@ class ModHandler:
             )
 
     def _start_answer(self, update: Update, ticket_id: int) -> None:
-        """Кнопка «Ответить» — запоминаем заявку и ждём текст ответа."""
+        """Кнопка «Ответить» — закрепляем заявку за модератором и ждём ответа."""
         ticket = self._tickets.find_by_id(ticket_id)
         if ticket is None or ticket.status != "NEW":
             self._send(update.user_id, f"Заявка #{ticket_id} не найдена или уже закрыта.")
             return
+        assignee = self._tickets.get_assignee(ticket_id)
+        if assignee is not None and assignee != update.user_id:
+            self._send(update.user_id, (
+                f"⏳ Заявку #{ticket_id} уже ведёт другой модератор — "
+                "дождитесь его ответа."
+            ))
+            return
+        if not self._tickets.assign(ticket_id, update.user_id):
+            self._send(update.user_id, f"Заявку #{ticket_id} уже ведёт другой модератор.")
+            return
         with self._lock:
-            taken_by = self._taken_tickets.get(ticket_id)
-            if taken_by is not None and taken_by != update.user_id:
-                taker_name = self._pending_answer_names.get(taken_by, str(taken_by))
-                self._send(update.user_id, (
-                    f"⏳ Заявку #{ticket_id} уже взял {taker_name} — "
-                    "дождитесь его ответа."
-                ))
-                return
             self._pending_answer[update.user_id] = ticket_id
-            self._taken_tickets[ticket_id] = update.user_id
-            self._pending_answer_names[update.user_id] = update.user_name
         prompt_id = self._api.send_message(
             update.user_id,
             f"💬 Напишите ответ по заявке #{ticket_id} — я отправлю его {ticket.user_name}.",
@@ -189,14 +192,24 @@ class ModHandler:
             with self._lock:
                 self._pending_prompt_ids[update.user_id] = prompt_id
 
+    def _find_assigned_pending_ticket(self, user_id: int):
+        """Закреплённая за модератором заявка, в которой пользователь
+        ждёт ответа (последнее сообщение в диалоге — от пользователя)."""
+        for ticket in self._tickets.find_new():
+            if self._tickets.get_assignee(ticket.id) != user_id:
+                continue
+            if ticket.messages and ticket.messages[-1]["author"] == "user":
+                return ticket
+        return None
+
     def _send_answer(self, update: Update, ticket_id: int, text: str) -> None:
         self._delete_prompt(update.user_id)
-        self._release_ticket(ticket_id, update.user_id)
         ticket = self._tickets.find_by_id(ticket_id)
         if ticket is None:
             self._send(update.user_id, f"Заявка #{ticket_id} не найдена.")
             return
         if ticket.status != "NEW":
+            self._tickets.release(ticket_id)
             self._send(update.user_id, f"Заявка #{ticket_id} уже закрыта — ответ не отправлен.")
             return
         self._tickets.add_message(ticket_id, "mod", update.user_name, text,
@@ -207,16 +220,11 @@ class ModHandler:
             "Напишите ответ здесь, и он попадёт в эту заявку.",
             keyboards.status_button(),
         )
-        # Остальные модераторы видят ответ отдельным сообщением
-        notice = (
-            f"🛠 Ответ {update.user_name} по заявке #{ticket_id}:\n"
-            f"\n"
-            f"{text}"
+        self._send(
+            update.user_id,
+            f"Ответ отправлен автору заявки #{ticket_id}.",
+            keyboards.ticket_keyboard(ticket_id),
         )
-        for mod_id in self._moderators.get_all():
-            if mod_id != update.user_id:
-                self._api.send_message(
-                    mod_id, notice, keyboards.ticket_keyboard(ticket_id))
 
     def _close_ticket(self, user_id: int, ticket_id: int) -> None:
         """Кнопка «Закрыть» — закрывает заявку #<id>."""
@@ -229,26 +237,19 @@ class ModHandler:
             self._send(user_id, f"Заявка #{ticket_id} уже закрыта.")
             return
         self._tickets.close(ticket_id)
-        # Снимаем блокировку с заявки у всех модераторов, кто её взял
+        self._tickets.release(ticket_id)
+        # Снимаем режим ожидания ответа у модератора, который взял заявку
         with self._lock:
-            taker_id = self._taken_tickets.pop(ticket_id, None)
-            if taker_id is not None:
-                self._pending_answer.pop(taker_id, None)
-                self._pending_answer_names.pop(taker_id, None)
+            self._pending_answer.pop(user_id, None)
         # Удаляем висячий промпт «Напишите ответ» у того, кто взял заявку
-        if taker_id is not None:
-            self._delete_prompt(taker_id)
+        self._delete_prompt(user_id)
         self._api.send_message(
             ticket.user_id,
             f"✅ Ваша заявка #{ticket_id} закрыта. Диалог по ней завершён. "
             "Если проблема осталась — создайте новую заявку кнопкой «📝 Заявка».",
             keyboards.closed_ticket_buttons(),
         )
-        # Модераторы получают отдельное уведомление о закрытии
-        notice = f"✅ Заявка #{ticket_id} закрыта ({ticket.user_name})."
-        for mod_id in self._moderators.get_all():
-            if mod_id != user_id:
-                self._api.send_message(mod_id, notice, keyboards.menu_keyboard())
+        self._send(user_id, f"Заявка #{ticket_id} закрыта.")
 
     def _cmd_mods(self, user_id: int) -> None:
         """Кнопка «Модераторы» — список модераторов с кнопками."""
@@ -259,7 +260,7 @@ class ModHandler:
             self._send(user_id, "🛠 Модераторы — нажмите, чтобы удалить:")
             for mod_id in all_mods:
                 self._send(
-                    mod_id,
+                    user_id,
                     f"• {mod_id}",
                     keyboards.remove_moderator_button(mod_id),
                 )
@@ -315,20 +316,17 @@ class ModHandler:
         self._api.send_message(user_id, text, buttons)
 
     def _reset_pending(self, user_id: int) -> None:
-        """Сбрасывает незавершённые режимы (ожидание ответа / ID модератора)."""
+        """Сбрасывает незавершённые режимы (ожидание ответа / ID модератора).
+
+        Если модератор взял заявку, но не ответил — освобождаем её
+        для других модераторов.
+        """
         with self._lock:
             ticket_id = self._pending_answer.pop(user_id, None)
             self._pending_add.discard(user_id)
-            self._pending_answer_names.pop(user_id, None)
-            if ticket_id is not None and self._taken_tickets.get(ticket_id) == user_id:
-                del self._taken_tickets[ticket_id]
+        if ticket_id is not None:
+            self._tickets.release(ticket_id, user_id)
         self._delete_prompt(user_id)
-
-    def _release_ticket(self, ticket_id: int, user_id: int) -> None:
-        """Снимает блокировку заявки после отправки ответа."""
-        with self._lock:
-            if self._taken_tickets.get(ticket_id) == user_id:
-                del self._taken_tickets[ticket_id]
 
     def _delete_prompt(self, user_id: int) -> None:
         """Удаляет промпт «Напишите ответ» после отправки/отмены ответа."""

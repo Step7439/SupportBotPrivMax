@@ -153,34 +153,31 @@ class TestUserHandler(BaseTest):
         self.assertIn("проблема А", notice.text)
         self.assertEqual(notice.buttons[0][0]["payload"], "mod:answer:1")
 
-        # Ответ модератора: пользователь получает ответ, автор — без дубля
+        # Ответ модератора: пользователь получает ответ, автор — подтверждение
         self.press("mod:answer:1")
         self.api.sent.clear()  # промпт «Напишите ответ» — служебное
         self.say("вот решение")
         self.assertIn("Ответ поддержки по заявке #1", self.api.texts(200)[0])
-        self.assertEqual(self.api.to(100), [])
+        self.assertIn("Ответ отправлен автору заявки #1", self.api.texts(100)[-1])
 
-        # Ответ пользователя — отдельное сообщение модератору
+        # Ответ пользователя — отдельное сообщение только назначенному модератору
         self.say("спасибо, помогло", user_id=200)
-        reply = self.api.to(100)[0]
-        self.assertIn("Ответ пользователя по заявке #1", reply.text)
+        reply = [s for s in self.api.to(100) if "Ответ пользователя" in s.text][0]
         self.assertIn("спасибо, помогло", reply.text)
         self.assertEqual(reply.buttons[0][0]["payload"], "mod:answer:1")
 
-    def test_mod_answer_visible_to_other_mods(self):
-        # Ответ модератора приходит отдельным сообщением другим модераторам
+    def test_mod_answer_not_broadcast_to_other_mods(self):
+        # Ответ модератора уходит только пользователю и автору —
+        # другим модераторам ничего не приходит (диалог один-на-один)
         self.moderators.add(300)
         self.say("📝 Заявка", user_id=200)
         self.say("проблема А", user_id=200)
         self.api.sent.clear()
         self.press("mod:answer:1")
         self.say("вот решение")
-        reply = self.api.to(300)[0]
-        self.assertIn("Ответ Тест по заявке #1", reply.text)
-        self.assertIn("вот решение", reply.text)
-        # Автор ответа не получает дубль (промпт удалён после отправки)
-        self.assertEqual(
-            [s for s in self.api.to(100) if "Напишите ответ" not in s.text], [])
+        self.assertEqual(self.api.to(300), [])
+        # Автор получил подтверждение отправки, а не дубль ответа
+        self.assertIn("Ответ отправлен автору заявки #1", self.api.texts(100)[-1])
 
     def test_empty_text_does_not_create_ticket(self):
         # Пустой текст отфильтровывается в Bot._handle, а обработчик
@@ -233,21 +230,25 @@ class TestUserHandler(BaseTest):
         self.assertIn("нажмите кнопку", self.api.texts(200)[0].lower())
 
     def test_user_reply_after_mod_answer_goes_to_ticket(self):
-        # После ответа модератора пользователь пишет в ту же заявку
+        # После ответа модератора пользователь пишет в ту же заявку —
+        # ответ уходит только назначенному модератору
+        self.moderators.add(300)
         self.say("📝 Заявка", user_id=200)
         self.say("проблема А", user_id=200)
-        self.press("mod:answer:1")
-        self.say("вот решение")
+        self.press("mod:answer:1", user_id=100)
+        self.say("вот решение", user_id=100)
         self.api.sent.clear()
         self.say("спасибо, помогло", user_id=200)
         ticket = self.tickets.find_by_id(1)
         self.assertEqual(len(ticket.messages), 2)
         self.assertEqual(ticket.messages[1]["author"], "user")
         self.assertEqual(ticket.messages[1]["text"], "спасибо, помогло")
-        # Ответ пользователя пришёл модератору отдельным сообщением
-        reply = self.api.to(100)[0]
+        # Ответ пришёл только назначенному модератору 100
+        reply = [s for s in self.api.to(100) if "Ответ пользователя" in s.text][0]
         self.assertIn("спасибо, помогло", reply.text)
         self.assertEqual(reply.buttons[0][0]["payload"], "mod:answer:1")
+        # Другой модератор не получает переписку
+        self.assertEqual(self.api.to(300), [])
 
     def test_pending_ticket_reset_by_dialog_reply(self):
         # Нажал «Заявка», но написал в существующий диалог —
@@ -366,10 +367,8 @@ class TestModButtons(BaseTest):
         ticket = self.tickets.find_by_id(1)
         self.assertEqual(ticket.messages[0]["author"], "mod")
         self.assertEqual(ticket.messages[0]["text"], "вот решение")
-        # Автор ответа не получает дубль своего сообщения
-        # (промпт «Напишите ответ» удалён после отправки)
-        self.assertEqual(
-            [s for s in self.api.to(100) if "Напишите ответ" not in s.text], [])
+        # Автор получил подтверждение отправки, а не дубль ответа
+        self.assertIn("Ответ отправлен автору заявки #1", self.api.texts(100)[-1])
 
     def test_close_notice_has_status_button(self):
         self.press("mod:close:1")
@@ -378,6 +377,12 @@ class TestModButtons(BaseTest):
         # Кнопки: новая заявка + статус
         payloads = [b["payload"] for row in close_msg.buttons for b in row]
         self.assertEqual(payloads, ["/ticket", "/status"])
+
+    def test_close_not_broadcast_to_other_mods(self):
+        # Закрытие заявки не рассылается другим модераторам
+        self.moderators.add(300)
+        self.press("mod:close:1")
+        self.assertEqual(self.api.to(300), [])
 
     def test_answer_on_closed_ticket(self):
         self.tickets.close(1)
@@ -416,19 +421,28 @@ class TestModButtons(BaseTest):
         self.moderators.add(300)
         self.press("mod:answer:1", user_id=100)
         self.press("mod:answer:1", user_id=300)
-        self.assertIn("уже взял", self.api.texts(300)[0])
+        self.assertIn("уже ведёт", self.api.texts(300)[0])
         # Модератор 100 всё ещё может ответить
         self.say("вот решение", user_id=100)
         self.assertIn("Ответ поддержки по заявке #1", self.api.texts(200)[0])
 
-    def test_ticket_released_after_answer(self):
-        # После отправки ответа заявку может взять другой модератор
+    def test_ticket_stays_assigned_after_answer(self):
+        # После отправки ответа заявка остаётся за модератором —
+        # он ведёт диалог до закрытия (один-на-один)
         self.moderators.add(300)
         self.press("mod:answer:1", user_id=100)
         self.say("вот решение", user_id=100)
+        self.assertEqual(self.tickets.get_assignee(1), 100)
         self.press("mod:answer:1", user_id=300)
-        prompt = [t for t in self.api.texts(300) if "Напишите ответ" in t]
-        self.assertTrue(prompt)
+        self.assertIn("уже ведёт", self.api.texts(300)[0])
+        # Назначенный модератор продолжает диалог без промпта:
+        # после ответа пользователя его текст уходит в заявку напрямую
+        self.api.sent.clear()
+        self.say("не помогло", user_id=200)
+        self.assertIn("не помогло", self.api.texts(100)[0])
+        self.api.sent.clear()
+        self.say("уточнение по заявке", user_id=100)
+        self.assertIn("уточнение по заявке", self.api.texts(200)[0])
 
     def test_ticket_released_on_cancel(self):
         # Отмена ввода освобождает заявку для другого модератора
@@ -446,7 +460,7 @@ class TestModButtons(BaseTest):
         self.assertIn("Ответ поддержки по заявке #1", self.api.texts(200)[0])
 
     def test_close_releases_taken_ticket(self):
-        # Закрытие заявки снимает блокировку у модератора, взявшего её
+        # Закрытие заявки снимает закрепление у модератора, взявшего её
         self.press("mod:answer:1")
         self.press("mod:close:1")
         self.api.sent.clear()
@@ -454,6 +468,7 @@ class TestModButtons(BaseTest):
         self.say("вот решение")
         self.assertIn("Не понял сообщение", self.api.texts(100)[-1])
         self.assertEqual(self.api.to(200), [])
+        self.assertIsNone(self.tickets.get_assignee(1))
 
     def test_unknown_ticket(self):
         self.press("mod:close:99")
@@ -527,6 +542,14 @@ class TestModeratorManagement(BaseTest):
         self.assertIn("100", texts[1])
         add_msg = self.api.to(100)[-1]
         self.assertEqual(add_msg.buttons[0][0]["payload"], "mod:add")
+
+    def test_mods_list_goes_to_requester_chat(self):
+        # Список модераторов приходит в чат запросившего, а не каждому модератору
+        self.moderators.add(300)
+        self.api.sent.clear()
+        self.press("mod:mods")
+        self.assertEqual(self.api.to(300), [])
+        self.assertIn("100", self.api.texts(100)[1])
 
     def test_add_moderator_flow(self):
         self.press("mod:add")
@@ -604,6 +627,34 @@ class TestTicketService(unittest.TestCase):
         self.svc.close(1)
         self.assertEqual([t.id for t in self.svc.find_new()], [2])
         self.svc.close(99)  # не падает
+
+    def test_assign_and_release(self):
+        t = self.svc.create(1, "А", "текст1")
+        self.assertTrue(self.svc.assign(t.id, 100))
+        # Повторное закрепление тем же модератором — ок
+        self.assertTrue(self.svc.assign(t.id, 100))
+        # Другой модератор закрепить не может
+        self.assertFalse(self.svc.assign(t.id, 300))
+        self.assertEqual(self.svc.get_assignee(t.id), 100)
+        # Чужой релиз не действует
+        self.svc.release(t.id, 300)
+        self.assertEqual(self.svc.get_assignee(t.id), 100)
+        # Свой релиз снимает закрепление
+        self.svc.release(t.id, 100)
+        self.assertIsNone(self.svc.get_assignee(t.id))
+        # После снятия другой модератор может закрепить
+        self.assertTrue(self.svc.assign(t.id, 300))
+
+    def test_assign_closed_ticket_rejected(self):
+        t = self.svc.create(1, "А", "текст1")
+        self.svc.close(t.id)
+        self.assertFalse(self.svc.assign(t.id, 100))
+
+    def test_assign_persists(self):
+        t = self.svc.create(1, "А", "текст1")
+        self.svc.assign(t.id, 100)
+        svc2 = TicketService(self.config)
+        self.assertEqual(svc2.get_assignee(t.id), 100)
 
 
 # --- Тесты MaxApi (без сети) ---

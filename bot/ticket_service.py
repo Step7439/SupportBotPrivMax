@@ -20,6 +20,8 @@ class Ticket:
     text: str
     status: str
     created_at: Optional[str] = field(default=None)
+    # Модератор, за которым закреплена заявка (диалог один-на-один)
+    assignee: Optional[int] = field(default=None)
     # Диалог: [{"author": "user"|"mod", "name": ..., "text": ..., "senderId": ...}, ...]
     messages: list = field(default_factory=list)
 
@@ -47,6 +49,7 @@ class TicketService:
                 text=item["text"],
                 status=item["status"],
                 created_at=item.get("createdAt"),
+                assignee=item.get("assignee"),
                 messages=item.get("messages", []),
             )
             self._tickets[ticket.id] = ticket
@@ -81,6 +84,37 @@ class TicketService:
 
     def find_by_id(self, ticket_id: int) -> Optional[Ticket]:
         return self._tickets.get(ticket_id)
+
+    def assign(self, ticket_id: int, moderator_id: int) -> bool:
+        """Закрепляет заявку за модератором (диалог один-на-один).
+
+        False — если заявку уже ведёт другой модератор.
+        """
+        with self._lock:
+            ticket = self._tickets.get(ticket_id)
+            if ticket is None or ticket.status != STATUS_NEW:
+                return False
+            if ticket.assignee is not None and ticket.assignee != moderator_id:
+                return False
+            ticket.assignee = moderator_id
+            self._save()
+            return True
+
+    def release(self, ticket_id: int, moderator_id: int = None) -> None:
+        """Снимает закрепление заявки (после закрытия или отказа модератора)."""
+        with self._lock:
+            ticket = self._tickets.get(ticket_id)
+            if ticket is None:
+                return
+            if moderator_id is not None and ticket.assignee != moderator_id:
+                return
+            ticket.assignee = None
+            self._save()
+
+    def get_assignee(self, ticket_id: int) -> Optional[int]:
+        """Модератор, за которым закреплена заявка (или None)."""
+        ticket = self._tickets.get(ticket_id)
+        return ticket.assignee if ticket else None
 
     def find_new(self) -> list[Ticket]:
         return sorted(
